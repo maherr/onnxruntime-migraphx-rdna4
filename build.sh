@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# build.sh — clone, patch, and build ONNX Runtime 1.24.2 + AMDMIGraphX 6.4.2
+# build.sh, clone, patch, and build ONNX Runtime 1.24.2 + AMDMIGraphX 6.4.2
 # for AMD RDNA 4 (gfx1201 / RX 9070).
 #
 # Overridable env vars:
-#   BUILD_DIR        Working dir for clones + builds  (default: ~/.local/share/gpu-diarization-build)
-#   INSTALL_PREFIX   Install prefix                    (default: $BUILD_DIR)
-#   JOBS             Parallel build jobs               (default: nproc)
-#   GFX_TARGET       AMDGPU target arch                (default: gfx1201)
-#   ROCM_PREFIX      ROCm install root                 (default: /usr on Fedora; use /opt/rocm on Ubuntu)
-#   SKIP_CHECKS      Set to bypass sanity checks       (default: unset)
+#   BUILD_DIR                      Working dir for clones + builds  (default: ~/.local/share/gpu-diarization-build)
+#   INSTALL_PREFIX                 Install prefix                    (default: $BUILD_DIR)
+#   JOBS                           Parallel build jobs               (default: nproc)
+#   GFX_TARGET                     AMDGPU target arch                (default: gfx1201)
+#   ROCM_PREFIX                    ROCm install root                 (default: /usr on Fedora; use /opt/rocm on Ubuntu)
+#   ORT_MIGRAPHX_MODEL_CACHE_PATH  Where the shipped .mxr is dropped (default: ~/.cache/migraphx-compiled)
+#   SKIP_CHECKS                    Set to bypass sanity checks       (default: unset)
 #
 # Exit codes:
 #   0   success
@@ -74,11 +75,11 @@ check_prereqs() {
   local clang_major
   clang_major=$(clang --version 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1 || echo 0)
   if [ "$clang_major" -lt 19 ]; then
-    die "clang $clang_major found — need >=19. On Fedora 43, the rocm-llvm package ships clang 19." 1
+    die "clang $clang_major found, need >=19. On Fedora 43, the rocm-llvm package ships clang 19." 1
   fi
 
   if ! rocminfo 2>/dev/null | grep -q "$GFX_TARGET"; then
-    warn "rocminfo does not report $GFX_TARGET — your GPU may not be the verified target."
+    warn "rocminfo does not report $GFX_TARGET, your GPU may not be the verified target."
     warn "Continuing anyway; override GFX_TARGET env var if you are on a different arch."
   fi
 
@@ -87,7 +88,7 @@ check_prereqs() {
   free_kb=$(df -Pk "$BUILD_DIR" | awk 'NR==2 {print $4}')
   local free_gb=$((free_kb / 1024 / 1024))
   if [ "$free_gb" -lt 20 ]; then
-    warn "Only ${free_gb} GB free at $BUILD_DIR — build wants ~25 GB. It may fail late."
+    warn "Only ${free_gb} GB free at $BUILD_DIR, build wants ~25 GB. It may fail late."
   fi
 
   log "Prerequisites OK (clang $clang_major, $free_gb GB free at $BUILD_DIR)"
@@ -121,7 +122,7 @@ apply_patches() {
       elif git apply --reverse --check "$pfile" 2>/dev/null; then
         log "Already applied: $p"
       else
-        die "Cannot apply $p — working tree may be dirty or base SHA wrong. Reset $repo_dir and retry." 2
+        die "Cannot apply $p, working tree may be dirty or base SHA wrong. Reset $repo_dir and retry." 2
       fi
     done
   )
@@ -140,7 +141,7 @@ build_migraphx() {
       -DBUILD_TESTING=OFF \
       .. \
       || die "cmake MIGraphX failed" 3
-    log "Building MIGraphX ($JOBS jobs — expect 20–40 min)"
+    log "Building MIGraphX ($JOBS jobs, expect 20-40 min)"
     make -j"$JOBS" || die "make MIGraphX failed" 3
     log "Installing MIGraphX → $MIGRAPHX_INSTALL"
     make install || die "make install MIGraphX failed" 3
@@ -148,7 +149,7 @@ build_migraphx() {
 }
 
 build_ort() {
-  log "Building ONNX Runtime with MIGraphX EP (expect 20–40 min)"
+  log "Building ONNX Runtime with MIGraphX EP (expect 20-40 min)"
   (
     cd "$ORT_DIR"
     ./build.sh \
@@ -174,8 +175,25 @@ build_ort() {
     cp -a "$rel/libonnxruntime_providers_shared.so" "$ORT_INSTALL/lib/" \
       || die "ORT install: providers_shared copy failed" 3
     cp -a "$rel/libonnxruntime_providers_migraphx.so" "$ORT_INSTALL/lib/" \
-      || die "ORT install: providers_migraphx copy failed — check --use_migraphx build output" 3
+      || die "ORT install: providers_migraphx copy failed, check --use_migraphx build output" 3
   )
+}
+
+install_precompiled_mxr() {
+  local mxr_src="$SCRIPT_DIR/artifacts/precompiled-mxr-gfx1201"
+  local mxr_dest="${ORT_MIGRAPHX_MODEL_CACHE_PATH:-$HOME/.cache/migraphx-compiled}"
+
+  if ! ls "$mxr_src"/*.mxr >/dev/null 2>&1; then
+    log "No shipped .mxr found at $mxr_src (first witness call will cold-compile, ~46s)"
+    return 0
+  fi
+
+  log "Installing shipped precompiled .mxr → $mxr_dest"
+  mkdir -p "$mxr_dest"
+  # cp -n: don't overwrite an existing .mxr with the same hash
+  cp -n "$mxr_src"/*.mxr "$mxr_dest/" 2>/dev/null || true
+  log "  If ORT/MIGraphX/driver/model hashes match, first witness call hits warm cache (~17s)"
+  log "  If not, MIGraphX will cold-compile and write a new .mxr (harmless, just no speedup)"
 }
 
 main() {
@@ -195,6 +213,8 @@ main() {
   clone_pin "$ORT_REPO" "$ORT_DIR" "$ORT_TAG" "$ORT_SHA"
   apply_patches "$ORT_DIR" "${ORT_PATCHES[@]}"
   build_ort
+
+  install_precompiled_mxr
 
   echo
   log "Build complete."

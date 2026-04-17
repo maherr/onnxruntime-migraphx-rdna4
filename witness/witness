@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-witness — speaker-aware transcription pipeline.
+witness, speaker-aware transcription pipeline.
 
 Whisper (Vulkan/RADV) and speakrs (ROCm/MIGraphX) use independent GPU driver
 stacks and can run concurrently on the same physical GPU. Wall time collapses
@@ -9,7 +9,7 @@ preserves the sequential baseline.
 
 Pipeline:
   1. Convert audio to 16 kHz mono WAV (ffmpeg)
-  2. VRAM preflight — fall back to serial if free < 4 GiB
+  2. VRAM preflight, fall back to serial if free < 4 GiB
   3. Fork whisper-cli and speakrs-cli --gpu in parallel, wait on both
   4. Merge Whisper timestamps with speakrs segments by overlap
   5. Emit diarized Markdown transcript
@@ -19,6 +19,7 @@ Usage:
 """
 
 import argparse
+import glob
 import json
 import os
 import subprocess
@@ -29,24 +30,63 @@ import time
 from pathlib import Path
 
 
-DEFAULT_MODEL = os.path.expanduser("~/.local/share/voxtype/models/ggml-large-v3.bin")
-TURBO_MODEL = os.path.expanduser("~/.local/share/voxtype/models/ggml-large-v3-turbo.bin")
-WHISPER_CLI = os.path.expanduser("~/.local/share/whisper-cpp/src/build/bin/whisper-cli")
-SPEAKRS_CLI = os.path.expanduser("~/.local/bin/speakrs-cli")
+def _env_path(var: str, default: str) -> str:
+    return os.path.expanduser(os.environ.get(var, default))
 
-ORT_LIB = os.path.expanduser(
-    "~/.local/share/gpu-diarization-build/ort-rocm-install/lib/libonnxruntime.so.1.24.2"
+
+DEFAULT_MODEL = _env_path("WITNESS_WHISPER_MODEL", "~/.local/share/voxtype/models/ggml-large-v3.bin")
+TURBO_MODEL = _env_path("WITNESS_WHISPER_MODEL_TURBO", "~/.local/share/voxtype/models/ggml-large-v3-turbo.bin")
+WHISPER_CLI = _env_path("WITNESS_WHISPER_CLI", "~/.local/share/whisper-cpp/src/build/bin/whisper-cli")
+SPEAKRS_CLI = _env_path("WITNESS_SPEAKRS_CLI", "~/.local/bin/speakrs-cli")
+
+ORT_LIB = _env_path(
+    "WITNESS_ORT_LIB",
+    "~/.local/share/gpu-diarization-build/ort-rocm-install/lib/libonnxruntime.so.1.24.2",
 )
 MIGRAPHX_LIB_DIRS = [
-    os.path.expanduser("~/.local/share/gpu-diarization-build/ort-rocm-install/lib"),
-    os.path.expanduser("~/.local/share/gpu-diarization-build/migraphx-install/lib"),
-    os.path.expanduser("~/.local/share/gpu-diarization-build/migraphx-install/lib/migraphx/lib"),
+    _env_path("WITNESS_ORT_LIB_DIR", "~/.local/share/gpu-diarization-build/ort-rocm-install/lib"),
+    _env_path("WITNESS_MIGRAPHX_LIB_DIR", "~/.local/share/gpu-diarization-build/migraphx-install/lib"),
+    _env_path(
+        "WITNESS_MIGRAPHX_EXTRA_LIB_DIR",
+        "~/.local/share/gpu-diarization-build/migraphx-install/lib/migraphx/lib",
+    ),
 ]
-MIGRAPHX_CACHE_DIR = os.path.expanduser("~/.cache/migraphx-compiled")
+MIGRAPHX_CACHE_DIR = _env_path("ORT_MIGRAPHX_MODEL_CACHE_PATH", "~/.cache/migraphx-compiled")
 
-VRAM_SYSFS = "/sys/class/drm/card1/device/mem_info_vram_used"
-VRAM_TOTAL_SYSFS = "/sys/class/drm/card1/device/mem_info_vram_total"
 VRAM_FREE_MIN_BYTES = 4 * 1024 * 1024 * 1024  # 4 GiB
+AMD_VENDOR_ID = "0x1002"
+
+
+def _find_amd_drm_card() -> str | None:
+    """Return the /sys/class/drm/cardN path whose vendor is AMD, or None.
+
+    Honors WITNESS_AMD_CARD (e.g. 'card1') to override the scan.
+    """
+    override = os.environ.get("WITNESS_AMD_CARD")
+    if override:
+        path = f"/sys/class/drm/{override}/device"
+        return path if os.path.isdir(path) else None
+
+    for card_dir in sorted(glob.glob("/sys/class/drm/card[0-9]*")):
+        vendor_file = os.path.join(card_dir, "device", "vendor")
+        if not os.path.isfile(vendor_file):
+            continue
+        try:
+            with open(vendor_file) as f:
+                if f.read().strip().lower() == AMD_VENDOR_ID:
+                    return os.path.join(card_dir, "device")
+        except OSError:
+            continue
+    return None
+
+
+_AMD_DEVICE_DIR = _find_amd_drm_card()
+VRAM_SYSFS = (
+    os.path.join(_AMD_DEVICE_DIR, "mem_info_vram_used") if _AMD_DEVICE_DIR else None
+)
+VRAM_TOTAL_SYSFS = (
+    os.path.join(_AMD_DEVICE_DIR, "mem_info_vram_total") if _AMD_DEVICE_DIR else None
+)
 
 
 def convert_to_wav(input_path: str, output_path: str) -> None:
@@ -74,6 +114,8 @@ def get_audio_duration(wav_path: str) -> float:
 
 
 def read_vram_free_bytes() -> int:
+    if VRAM_SYSFS is None or VRAM_TOTAL_SYSFS is None:
+        return -1
     try:
         total = int(open(VRAM_TOTAL_SYSFS).read().strip())
         used = int(open(VRAM_SYSFS).read().strip())
@@ -240,7 +282,7 @@ def generate_markdown(
 ) -> str:
     filename = os.path.basename(input_file)
     lines = [
-        f"# Diarized Transcript — {filename}",
+        f"# Diarized Transcript, {filename}",
         "",
         f"**Duration:** {format_timestamp(duration)}",
         f"**Speakers detected:** {speakers_found}",
@@ -262,7 +304,7 @@ def generate_markdown(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="witness — speaker-aware transcription pipeline")
+    parser = argparse.ArgumentParser(description="witness, speaker-aware transcription pipeline")
     parser.add_argument("audio_file")
     parser.add_argument("-o", "--output")
     parser.add_argument("-m", "--model", default=DEFAULT_MODEL)
@@ -304,13 +346,13 @@ def main():
         free_bytes = read_vram_free_bytes()
         if free_bytes >= 0 and free_bytes < VRAM_FREE_MIN_BYTES:
             print(
-                f"Warning: VRAM free {free_bytes / 1048576:.0f} MiB < 4 GiB — "
+                f"Warning: VRAM free {free_bytes / 1048576:.0f} MiB < 4 GiB, "
                 "falling back to --serial to avoid OOM.",
                 file=sys.stderr,
             )
             mode = "serial"
         elif free_bytes < 0:
-            print("Warning: could not read VRAM sysfs — proceeding in parallel.", file=sys.stderr)
+            print("Warning: could not read VRAM sysfs, proceeding in parallel.", file=sys.stderr)
 
     print(f"Mode:   {mode}")
     print()

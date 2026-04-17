@@ -7,7 +7,7 @@ diff --git a/onnxruntime/core/providers/migraphx/migraphx_execution_provider.cc 
      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT4E2M1:
 -      mgx_type = migraphx_shape_fp4x2_type;
 -      break;
-+      // fp4x2 type not available in MIGraphX ROCm 6.4 — fall through to unsupported
++      // fp4x2 type not available in MIGraphX ROCm 6.4, fall through to unsupported
 +      return false;
      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT4:
        mgx_type = migraphx_shape_int8_type;
