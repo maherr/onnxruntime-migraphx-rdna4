@@ -1,0 +1,13 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index b969a85..f9f02cc 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -343,7 +343,7 @@ add_library(migraphx_all_targets INTERFACE)
+ add_subdirectory(api)
+ add_subdirectory(driver)
+ add_subdirectory(onnx)
+-add_subdirectory(tf)
++# add_subdirectory(tf)  # Disabled: protobuf ABI mismatch with hipcc on Fedora 43
+ 
+ if(MIGRAPHX_ENABLE_PYTHON)
+ add_subdirectory(py)

@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""
+witness — speaker-aware transcription pipeline.
+
+Whisper (Vulkan/RADV) and speakrs (ROCm/MIGraphX) use independent GPU driver
+stacks and can run concurrently on the same physical GPU. Wall time collapses
+from whisper_s + diarize_s to ~max(whisper_s, diarize_s). The --serial flag
+preserves the sequential baseline.
+
+Pipeline:
+  1. Convert audio to 16 kHz mono WAV (ffmpeg)
+  2. VRAM preflight — fall back to serial if free < 4 GiB
+  3. Fork whisper-cli and speakrs-cli --gpu in parallel, wait on both
+  4. Merge Whisper timestamps with speakrs segments by overlap
+  5. Emit diarized Markdown transcript
+
+Usage:
+  witness <audio_file> [--output file.md] [--language lang] [--turbo] [--serial]
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+
+DEFAULT_MODEL = os.path.expanduser("~/.local/share/voxtype/models/ggml-large-v3.bin")
+TURBO_MODEL = os.path.expanduser("~/.local/share/voxtype/models/ggml-large-v3-turbo.bin")
+WHISPER_CLI = os.path.expanduser("~/.local/share/whisper-cpp/src/build/bin/whisper-cli")
+SPEAKRS_CLI = os.path.expanduser("~/.local/bin/speakrs-cli")
+
+ORT_LIB = os.path.expanduser(
+    "~/.local/share/gpu-diarization-build/ort-rocm-install/lib/libonnxruntime.so.1.24.2"
+)
+MIGRAPHX_LIB_DIRS = [
+    os.path.expanduser("~/.local/share/gpu-diarization-build/ort-rocm-install/lib"),
+    os.path.expanduser("~/.local/share/gpu-diarization-build/migraphx-install/lib"),
+    os.path.expanduser("~/.local/share/gpu-diarization-build/migraphx-install/lib/migraphx/lib"),
+]
+MIGRAPHX_CACHE_DIR = os.path.expanduser("~/.cache/migraphx-compiled")
+
+VRAM_SYSFS = "/sys/class/drm/card1/device/mem_info_vram_used"
+VRAM_TOTAL_SYSFS = "/sys/class/drm/card1/device/mem_info_vram_total"
+VRAM_FREE_MIN_BYTES = 4 * 1024 * 1024 * 1024  # 4 GiB
+
+
+def convert_to_wav(input_path: str, output_path: str) -> None:
+    subprocess.run(
+        [
+            "ffmpeg", "-i", input_path,
+            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            output_path, "-y",
+        ],
+        capture_output=True,
+        check=True,
+    )
+
+
+def get_audio_duration(wav_path: str) -> float:
+    result = subprocess.run(
+        [
+            "ffprobe", "-i", wav_path,
+            "-show_entries", "format=duration",
+            "-v", "quiet", "-of", "csv=p=0",
+        ],
+        capture_output=True, text=True,
+    )
+    return float(result.stdout.strip())
+
+
+def read_vram_free_bytes() -> int:
+    try:
+        total = int(open(VRAM_TOTAL_SYSFS).read().strip())
+        used = int(open(VRAM_SYSFS).read().strip())
+        return max(0, total - used)
+    except Exception:
+        return -1
+
+
+def speakrs_env() -> dict:
+    env = os.environ.copy()
+    env["ORT_DYLIB_PATH"] = ORT_LIB
+    env["LD_LIBRARY_PATH"] = ":".join(MIGRAPHX_LIB_DIRS) + ":" + env.get("LD_LIBRARY_PATH", "")
+    env["ORT_MIGRAPHX_MODEL_CACHE_PATH"] = MIGRAPHX_CACHE_DIR
+    return env
+
+
+def _run_whisper(wav_path: str, model_path: str, language: str, out_base: str, result: dict) -> None:
+    """Target for whisper thread. Writes {'segments': [...], 'elapsed': float, 'err': str|None}."""
+    t0 = time.time()
+    try:
+        cmd = [
+            WHISPER_CLI,
+            "-m", model_path,
+            "-f", wav_path,
+            "-l", language,
+            "--output-json-full",
+            "-of", out_base,
+            "--no-prints",
+            "--flash-attn",
+        ]
+        subprocess.run(cmd, capture_output=True, check=True)
+
+        with open(out_base + ".json") as f:
+            data = json.load(f)
+        segments = []
+        for seg in data.get("transcription", []):
+            start_ms = seg["offsets"]["from"]
+            end_ms = seg["offsets"]["to"]
+            text = seg["text"].strip()
+            if text:
+                segments.append({
+                    "start": start_ms / 1000.0,
+                    "end": end_ms / 1000.0,
+                    "text": text,
+                })
+        result["segments"] = segments
+        result["err"] = None
+    except subprocess.CalledProcessError as e:
+        result["segments"] = []
+        result["err"] = f"whisper-cli failed: {e.stderr.decode('utf-8', errors='replace')}"
+    except Exception as e:  # noqa: BLE001
+        result["segments"] = []
+        result["err"] = f"whisper post-processing failed: {e}"
+    finally:
+        result["elapsed"] = time.time() - t0
+
+
+def _run_speakrs(wav_path: str, result: dict) -> None:
+    """Target for speakrs thread. Writes {'segments': [...], 'elapsed': float, 'err': str|None}."""
+    t0 = time.time()
+    os.makedirs(MIGRAPHX_CACHE_DIR, exist_ok=True)
+    env = speakrs_env()
+    try:
+        proc = subprocess.run(
+            [SPEAKRS_CLI, "--gpu", wav_path],
+            capture_output=True, text=True, env=env,
+        )
+        if proc.returncode != 0:
+            result["segments"] = []
+            result["err"] = f"speakrs-cli rc={proc.returncode}: {proc.stderr}"
+        else:
+            data = json.loads(proc.stdout)
+            result["segments"] = [
+                {"start": s["start"], "end": s["end"], "speaker": s["speaker"]}
+                for s in data["segments"]
+            ]
+            result["err"] = None
+    except Exception as e:  # noqa: BLE001
+        result["segments"] = []
+        result["err"] = f"speakrs-cli crashed: {e}"
+    finally:
+        result["elapsed"] = time.time() - t0
+
+
+def run_parallel(wav_path: str, model_path: str, language: str, out_base: str):
+    """Run Whisper and speakrs concurrently. Returns (whisper_res, speakrs_res, wall_s)."""
+    whisper_res: dict = {}
+    speakrs_res: dict = {}
+
+    t0 = time.time()
+    w_thread = threading.Thread(
+        target=_run_whisper,
+        args=(wav_path, model_path, language, out_base, whisper_res),
+        daemon=False,
+    )
+    s_thread = threading.Thread(
+        target=_run_speakrs,
+        args=(wav_path, speakrs_res),
+        daemon=False,
+    )
+    w_thread.start()
+    s_thread.start()
+    w_thread.join()
+    s_thread.join()
+    wall = time.time() - t0
+    return whisper_res, speakrs_res, wall
+
+
+def run_serial(wav_path: str, model_path: str, language: str, out_base: str):
+    """Run Whisper then speakrs sequentially (same as production transcribe-diarize)."""
+    whisper_res: dict = {}
+    speakrs_res: dict = {}
+    t0 = time.time()
+    _run_whisper(wav_path, model_path, language, out_base, whisper_res)
+    _run_speakrs(wav_path, speakrs_res)
+    wall = time.time() - t0
+    return whisper_res, speakrs_res, wall
+
+
+def assign_speakers(transcription: list[dict], diarization: list[dict]) -> list[dict]:
+    for tseg in transcription:
+        best_speaker = "UNKNOWN"
+        best_overlap = 0.0
+        for dseg in diarization:
+            ovs = max(tseg["start"], dseg["start"])
+            ove = min(tseg["end"], dseg["end"])
+            overlap = max(0.0, ove - ovs)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = dseg["speaker"]
+        tseg["speaker"] = best_speaker
+    return transcription
+
+
+def merge_consecutive(segments: list[dict]) -> list[dict]:
+    if not segments:
+        return []
+    merged = [segments[0].copy()]
+    for seg in segments[1:]:
+        if seg["speaker"] == merged[-1]["speaker"]:
+            merged[-1]["end"] = seg["end"]
+            merged[-1]["text"] += " " + seg["text"]
+        else:
+            merged.append(seg.copy())
+    return merged
+
+
+def format_timestamp(seconds: float) -> str:
+    m = int(seconds // 60)
+    s = int(seconds % 60)
+    return f"{m}:{s:02d}"
+
+
+def generate_markdown(
+    segments: list[dict],
+    input_file: str,
+    duration: float,
+    speakers_found: int,
+    transcription_time: float,
+    diarization_time: float,
+    language: str,
+    mode: str,
+    wall_time: float,
+) -> str:
+    filename = os.path.basename(input_file)
+    lines = [
+        f"# Diarized Transcript — {filename}",
+        "",
+        f"**Duration:** {format_timestamp(duration)}",
+        f"**Speakers detected:** {speakers_found}",
+        f"**Language:** {language}",
+        f"**Transcription time:** {transcription_time:.1f}s (Whisper large-v3, Vulkan GPU)",
+        f"**Diarization time:** {diarization_time:.1f}s (speakrs, MIGraphX GPU)",
+        f"**Pipeline wall time:** {wall_time:.1f}s ({mode})",
+        f"**Source:** `{filename}`",
+        "",
+        "---",
+        "",
+    ]
+    for seg in segments:
+        ts = format_timestamp(seg["start"])
+        lines.append(f"**{seg['speaker']}** [{ts}]")
+        lines.append(f"{seg['text']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="witness — speaker-aware transcription pipeline")
+    parser.add_argument("audio_file")
+    parser.add_argument("-o", "--output")
+    parser.add_argument("-m", "--model", default=DEFAULT_MODEL)
+    parser.add_argument("-l", "--language", default="auto")
+    parser.add_argument("--turbo", action="store_true", help="Use large-v3-turbo model")
+    parser.add_argument(
+        "--serial", action="store_true",
+        help="Force serial Whisper-then-speakrs execution (fallback).",
+    )
+    args = parser.parse_args()
+
+    input_path = os.path.abspath(args.audio_file)
+    if not os.path.exists(input_path):
+        print(f"Error: File not found: {input_path}", file=sys.stderr)
+        sys.exit(1)
+
+    for binary, label in ((WHISPER_CLI, "whisper-cli"), (SPEAKRS_CLI, "speakrs-cli")):
+        if not os.path.exists(binary):
+            print(f"Error: {label} not found at {binary}", file=sys.stderr)
+            sys.exit(1)
+
+    model_path = TURBO_MODEL if args.turbo else args.model
+    if not os.path.exists(model_path):
+        print(f"Error: Model not found at {model_path}", file=sys.stderr)
+        sys.exit(1)
+
+    output_path = (
+        os.path.abspath(args.output)
+        if args.output
+        else os.path.join(os.path.dirname(input_path), f"{Path(input_path).stem}-diarized.md")
+    )
+
+    print(f"Input:  {input_path}")
+    print(f"Output: {output_path}")
+    print(f"Model:  {os.path.basename(model_path)}")
+
+    mode = "serial" if args.serial else "parallel"
+    if not args.serial:
+        free_bytes = read_vram_free_bytes()
+        if free_bytes >= 0 and free_bytes < VRAM_FREE_MIN_BYTES:
+            print(
+                f"Warning: VRAM free {free_bytes / 1048576:.0f} MiB < 4 GiB — "
+                "falling back to --serial to avoid OOM.",
+                file=sys.stderr,
+            )
+            mode = "serial"
+        elif free_bytes < 0:
+            print("Warning: could not read VRAM sysfs — proceeding in parallel.", file=sys.stderr)
+
+    print(f"Mode:   {mode}")
+    print()
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        wav_path = tmp.name
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            print("[1/4] Converting to WAV...")
+            convert_to_wav(input_path, wav_path)
+            duration = get_audio_duration(wav_path)
+            print(f"       Duration: {format_timestamp(duration)}")
+
+            out_base = os.path.join(tmpdir, "whisper_out")
+
+            if mode == "parallel":
+                print("[2-3/4] Running Whisper (Vulkan) + speakrs (MIGraphX) concurrently...")
+                whisper_res, speakrs_res, wall = run_parallel(
+                    wav_path, model_path, args.language, out_base,
+                )
+            else:
+                print("[2/4] Transcribing with Whisper (Vulkan)...")
+                print("[3/4] Diarizing with speakrs (MIGraphX)... (sequential)")
+                whisper_res, speakrs_res, wall = run_serial(
+                    wav_path, model_path, args.language, out_base,
+                )
+
+            if whisper_res.get("err"):
+                print(f"Error: {whisper_res['err']}", file=sys.stderr)
+                sys.exit(1)
+            if speakrs_res.get("err"):
+                print(f"Error: {speakrs_res['err']}", file=sys.stderr)
+                sys.exit(1)
+
+            transcription = whisper_res["segments"]
+            diarization = speakrs_res["segments"]
+            transcription_time = whisper_res["elapsed"]
+            diarization_time = speakrs_res["elapsed"]
+
+            speakers = sorted({s["speaker"] for s in diarization})
+            print(
+                f"       whisper {transcription_time:.1f}s → {len(transcription)} segments; "
+                f"speakrs {diarization_time:.1f}s → {len(speakers)} speakers; wall {wall:.1f}s"
+            )
+
+            print("[4/4] Merging and writing markdown...")
+            segments = assign_speakers(transcription, diarization)
+            segments = merge_consecutive(segments)
+
+            detected_lang = args.language
+            if detected_lang == "auto" and transcription:
+                detected_lang = "auto-detected"
+
+            markdown = generate_markdown(
+                segments=segments,
+                input_file=input_path,
+                duration=duration,
+                speakers_found=len(speakers),
+                transcription_time=transcription_time,
+                diarization_time=diarization_time,
+                language=detected_lang,
+                mode=mode,
+                wall_time=wall,
+            )
+            with open(output_path, "w") as f:
+                f.write(markdown)
+
+            print()
+            print(f"Done! Transcript saved to: {output_path}")
+            print(f"  Transcription: {transcription_time:.1f}s")
+            print(f"  Diarization:   {diarization_time:.1f}s")
+            print(f"  Pipeline wall: {wall:.1f}s ({mode})")
+        finally:
+            if os.path.exists(wav_path):
+                os.unlink(wav_path)
+
+
+if __name__ == "__main__":
+    main()

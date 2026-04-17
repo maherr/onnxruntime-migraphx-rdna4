@@ -1,0 +1,12 @@
+diff --git a/src/include/migraphx/tf/export.h b/src/include/migraphx/tf/export.h
+new file mode 100644
+index 0000000..88d63c1
+--- /dev/null
++++ b/src/include/migraphx/tf/export.h
+@@ -0,0 +1,6 @@
++#ifndef MIGRAPHX_TF_EXPORT_H
++#define MIGRAPHX_TF_EXPORT_H
++// Stub: TF support disabled for this build
++#define MIGRAPHX_TF_EXPORT __attribute__((visibility("default")))
++#define MIGRAPHX_TF_NO_EXPORT __attribute__((visibility("hidden")))
++#endif
