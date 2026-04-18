@@ -2,7 +2,7 @@
 
 Eight small patches that let ONNX Runtime 1.24.2 + AMDMIGraphX (`rocm-6.4.2` branch) build and run on AMD RDNA 4 consumer GPUs (specifically the RX 9070 / Navi 48 / gfx1201) on Fedora 43.
 
-ONNX Runtime's MIGraphX path already works on RDNA 2 and RDNA 3. RDNA 4 was the missing rung. These patches fill it. The [Witness](witness/README.md) speaker-diarization pipeline that lives in `witness/` is the first thing I used to prove the stack end-to-end; any ONNX model that runs on ORT's CUDA EP should be attemptable on consumer AMD via this build.
+ONNX Runtime's MIGraphX path already works on RDNA 2 and RDNA 3. RDNA 4 was the missing rung. These patches fill it. The [Witness](witness/README.md) speaker-diarization pipeline that lives in `witness/` is the first thing I used to prove the stack end-to-end. This makes Witness the first documented working speaker-diarization pipeline on AMD RDNA 4 consumer GPUs (gfx1201). Every pyannote/WhisperX ROCm setup I found targets RDNA 3 or older (gfx1100 on the RX 7900 XTX and below). If you know of a prior RDNA 4 diarization implementation, please open an issue so it can be credited here. Any ONNX model that runs on ORT's CUDA EP should be attemptable on consumer AMD via this build.
 
 What I actually measured, on a $550 RX 9070:
 
@@ -30,7 +30,7 @@ cd onnxruntime-migraphx-rdna4
 bash build.sh
 ```
 
-Expect ~45–75 min on a 16-thread machine and ~25 GB of free disk. The script clones MIGraphX at `rocm-6.4.2` (`db302ae`) and ORT at `v1.24.2` (`058787c`), applies the eight patches, builds both, and installs to `~/.local/share/gpu-diarization-build/` by default. Override via `BUILD_DIR`, `INSTALL_PREFIX`, `JOBS`, `GFX_TARGET`, `ROCM_PREFIX`.
+Expect ~45-75 min on a 16-thread machine and ~25 GB of free disk. The script clones MIGraphX at `rocm-6.4.2` (`db302ae`) and ORT at `v1.24.2` (`058787c`), applies the eight patches, builds both, and installs to `~/.local/share/gpu-diarization-build/` by default. Override via `BUILD_DIR`, `INSTALL_PREFIX`, `JOBS`, `GFX_TARGET`, `ROCM_PREFIX`.
 
 At the end of the build, the precompiled `.mxr` shipped in `artifacts/` is copied into `~/.cache/migraphx-compiled/`. If your ORT + MIGraphX + driver hashes match the pinned build, your first Witness call hits the warm cache (~17 s) instead of cold-compiling (~46 s). If they don't match, MIGraphX transparently re-compiles on first run.
 
@@ -86,11 +86,11 @@ On RDNA 3 (RX 7900 XT/XTX, gfx1100), Patch 5 (`no_device.cpp` guard) is likely s
 
 ## Known issues
 
-- **Rare heap-corruption race during process teardown.** I saw one crash in 232 sequential runs (binomial 95% CI roughly 0.01–2.4%, so "rare, not pinned down"). Surfaces as `corrupted double-linked list` from glibc, fires during `_dl_fini` after `main()` returns cleanly, so diarization output has already been written by then. Mitigation: for batch processing, retry the failed file once in a fresh subprocess. Single calls haven't hit it in my usage. Filed upstream at [`ROCm/AMDMIGraphX#4792`](https://github.com/ROCm/AMDMIGraphX/issues/4792) and [`microsoft/onnxruntime#28087`](https://github.com/microsoft/onnxruntime/issues/28087). Probably resolves when ROCm 7.x lands gfx1201 as officially supported.
+- **Rare heap-corruption race during process teardown.** I saw one crash in 232 sequential runs (binomial 95% CI roughly 0.01-2.4%, so "rare, not pinned down"). Surfaces as `corrupted double-linked list` from glibc, fires during `_dl_fini` after `main()` returns cleanly, so diarization output has already been written by then. Mitigation: for batch processing, retry the failed file once in a fresh subprocess. Single calls haven't hit it in my usage. Filed upstream at [`ROCm/AMDMIGraphX#4792`](https://github.com/ROCm/AMDMIGraphX/issues/4792) and [`microsoft/onnxruntime#28087`](https://github.com/microsoft/onnxruntime/issues/28087). Probably resolves when ROCm 7.x lands gfx1201 as officially supported.
 
 ## Sunset window
 
-These patches target ROCm 6.4 + ORT 1.24.2. Useful shelf life is probably 2–6 months:
+These patches target ROCm 6.4 + ORT 1.24.2. Useful shelf life is probably 2-6 months:
 
 - **Patches 7, 8** become no-ops once ROCm 7.x ships native `fp4x2` and `bf16` quantization.
 - **Patches 1, 2, 6** are Fedora-packaging workarounds (TF protobuf ABI, stub header, C-API link). They persist until Fedora packages protobuf / MIGraphX at matching ABIs.
