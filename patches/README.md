@@ -1,10 +1,12 @@
 # Patches
 
-Eight `.patch` files that let `onnxruntime 1.24.2` and `AMDMIGraphX` (`rocm-6.4.2` branch) build and run on the RX 9070 (gfx1201) on Fedora 43. Six against MIGraphX, two against ONNX Runtime.
+Seven `.patch` files that let `onnxruntime 1.24.2` and `AMDMIGraphX` (`rocm-6.4.2` branch) build and run on the RX 9070 (gfx1201) on Fedora 43. Five against MIGraphX, two against ONNX Runtime.
 
-These are what actually made the build go. Some of them are graceful-degradation stubs rather than "correct" fixes, so I wouldn't expect all eight to land upstream as-is, but the issues they solve are real, and publishing them documents the gaps in case anyone else hits the same walls.
+These are what actually made the build go. Some of them are graceful-degradation stubs rather than "correct" fixes, so I wouldn't expect all seven to land upstream as-is, but the issues they solve are real, and publishing them documents the gaps in case anyone else hits the same walls.
 
 Verified on: AMD Radeon RX 9070, Fedora 43, kernel 6.19.11, ROCm 6.4.4 packages.
+
+> **Update, 2026-04-20.** This set originally shipped as 8 patches on 2026-04-17. @pfultz2 at AMD reviewed patch 5 (the `no_device.cpp` `#error` strip) and pointed out that MIGraphX expects `clang++` as `CMAKE_CXX_COMPILER`, not `hipcc`. The old build was falling back to `/usr/bin/hipcc` (Fedora's default when the `hipcc` package is installed), which injects `-x hip` onto every TU including host-only ones, so the `#error` guard in `no_device.cpp` tripped correctly. Rebuilding with `-DCMAKE_CXX_COMPILER=/usr/lib64/rocm/llvm/bin/clang++` and the original `#error` restored, the full MIGraphX build completes cleanly. Patch 5 is retired. Full compile-commands evidence on [ROCm/AMDMIGraphX#4799](https://github.com/ROCm/AMDMIGraphX/issues/4799) (closed). The apply loop below and the cmake invocation both reflect the current 7-patch state and the required `clang++` flag.
 
 ## Apply order
 
@@ -14,12 +16,11 @@ Verified on: AMD Radeon RX 9070, Fedora 43, kernel 6.19.11, ROCm 6.4.4 packages.
 | 02 | `02-migraphx-tf-stub-header.patch` | MIGraphX @ `rocm-6.4.2` | `src/include/migraphx/tf/export.h` (new) | Tiny stub header so the ONNX path compiles after 01 |
 | 03 | `03-migraphx-mlir-fuse-stub.patch` | MIGraphX @ `rocm-6.4.2` | `src/targets/gpu/fuse_mlir.cpp` | Stub the MLIR fusion pass (rocMLIR version drift on Fedora) |
 | 04 | `04-migraphx-mlir-introspection-stub.patch` | MIGraphX @ `rocm-6.4.2` | `src/targets/gpu/mlir.cpp` | Stub rocMLIR introspection helpers; companion to 03 |
-| 05 | `05-migraphx-hipcc-device-guard.patch` | MIGraphX @ `rocm-6.4.2` | `src/targets/gpu/no_device.cpp` | Remove the `#error` that hipcc's device-compile pass trips over on gfx1201 |
 | 06 | `06-migraphx-c-api-drop-tf-link.patch` | MIGraphX @ `rocm-6.4.2` | `src/api/CMakeLists.txt` | Drop `-lmigraphx_tf` (companion to 01) |
 | 07 | `07-ort-fp4x2-fallback.patch` | onnxruntime @ `v1.24.2` | `.../migraphx_execution_provider.cc` | Graceful CPU fallback for `fp4x2` ops ROCm 6.4 doesn't support |
 | 08 | `08-ort-bf16-skip.patch` | onnxruntime @ `v1.24.2` | same file (hunk 2) | Skip `migraphx::quantize_bf16()` (not available in MIGraphX 6.4) |
 
-Six MIGraphX + two ORT = eight patches. Total about 2,500 lines of diff, most of that in Patches 3 and 4, which are long only because the rocMLIR C-API surface is broad; each individual stub is a trivial no-op.
+Five MIGraphX + two ORT = seven patches. Numbering preserves the historical 01-08 sequence so references in the wild still map 1:1; slot 05 is retired (see the Update note above). Total diff is around 2,500 lines, most of that in Patches 3 and 4, which are long only because the rocMLIR C-API surface is broad; each individual stub is a trivial no-op.
 
 ## Apply command
 
@@ -33,7 +34,6 @@ for p in 01-migraphx-tf-subdir-disable \
          02-migraphx-tf-stub-header \
          03-migraphx-mlir-fuse-stub \
          04-migraphx-mlir-introspection-stub \
-         05-migraphx-hipcc-device-guard \
          06-migraphx-c-api-drop-tf-link; do
   git apply /path/to/patches/$p.patch
 done
@@ -45,8 +45,17 @@ for p in 07-ort-fp4x2-fallback 08-ort-bf16-skip; do
   git apply /path/to/patches/$p.patch
 done
 
-# Build MIGraphX with explicit gfx1201 target:
-cd /path/to/AMDMIGraphX && cmake -B build -DMIGRAPHX_GPU_TARGETS=gfx1201 -DCMAKE_PREFIX_PATH=/usr
+# Build MIGraphX. IMPORTANT: MIGraphX expects clang++ as the top-level
+# CMAKE_CXX_COMPILER; it uses hipcc only internally for the device-compile
+# pass via hip::device. If you let CMake fall back to /usr/bin/hipcc as the
+# top-level CXX (Fedora's default when the hipcc package is installed),
+# -x hip leaks onto host-only TUs and the build breaks on no_device.cpp.
+cd /path/to/AMDMIGraphX && cmake -B build \
+    -DCMAKE_CXX_COMPILER=/usr/lib64/rocm/llvm/bin/clang++ \
+    -DCMAKE_C_COMPILER=/usr/lib64/rocm/llvm/bin/clang \
+    -DGPU_TARGETS=gfx1201 \
+    -DMIGRAPHX_GPU_TARGETS=gfx1201 \
+    -DCMAKE_PREFIX_PATH=/usr
 cmake --build build -j && sudo cmake --install build
 ```
 
@@ -67,10 +76,6 @@ Fedora 43 doesn't package the exact rocMLIR version MIGraphX expects, and mixing
 ### 04. MLIR introspection stub (mlir.cpp)
 
 Companion to 03. Stubs the rocMLIR introspection helpers `fuse_mlir.cpp` would otherwise call (`dump_mlir`, `compile_mlir`, `insert_mlir`, `get_tuning_config_mlir`). Same rationale: MLIR version drift makes linking against the full surface infeasible on distros that don't ship a version-matched rocMLIR.
-
-### 05. `#error` device-compilation guard (no_device.cpp)
-
-`no_device.cpp` contains a `#error "Device compilation not allowed for migraphx_gpu. Do not link with hip::device."` that fires under `__HIP_DEVICE_COMPILE__`. On gfx1201, hipcc's device-compile pass false-positives into this file during intermediate passes, killing the build. The patch removes the `#error` and rewrites the guard as a silent no-op for the host path. Despite the "hipcc" label this patch sometimes gets, the fix lives in MIGraphX's source tree, not in hipcc. As of the `rocm-6.4.2` branch the upstream `#error` is still present.
 
 ### 06. C-API link cleanup
 
@@ -102,4 +107,3 @@ Useful shelf life is probably 2–6 months, tied to ROCm 6.4.x and ORT 1.24.2:
 - Patches 7 and 8 become no-ops once ROCm 7.x ships native `fp4x2` and `bf16` quantization.
 - Patches 1, 2, 6 are Fedora-packaging workarounds that might persist longer.
 - Patches 3 and 4 are the most durable: rocMLIR version drift is a recurring problem.
-- Patch 5 depends on whether AMD ever cleans up the `#error` in `no_device.cpp` and improves the device-compile filter for the gfx12xx family.

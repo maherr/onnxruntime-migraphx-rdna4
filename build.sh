@@ -47,7 +47,7 @@ MIGRAPHX_PATCHES=(
   02-migraphx-tf-stub-header
   03-migraphx-mlir-fuse-stub
   04-migraphx-mlir-introspection-stub
-  05-migraphx-hipcc-device-guard
+  # 05 retired 2026-04-20 (build-config error, not a MIGraphX bug; see patches/README.md)
   06-migraphx-c-api-drop-tf-link
 )
 ORT_PATCHES=(
@@ -133,8 +133,20 @@ build_migraphx() {
   mkdir -p "$MIGRAPHX_DIR/build"
   (
     cd "$MIGRAPHX_DIR/build"
+    # MIGraphX expects clang++ as the top-level CMAKE_CXX_COMPILER.
+    # Letting it fall back to /usr/bin/hipcc (Fedora default) leaks -x hip
+    # onto host-only TUs and trips the #error in no_device.cpp.
+    # See https://github.com/ROCm/AMDMIGraphX/issues/4799 (closed).
+    local rocm_clangxx="$ROCM_PREFIX/llvm/bin/clang++"
+    local rocm_clang="$ROCM_PREFIX/llvm/bin/clang"
+    # Fedora ships ROCm's llvm under /usr/lib64/rocm/llvm; honor that if present.
+    [ -x /usr/lib64/rocm/llvm/bin/clang++ ] && rocm_clangxx=/usr/lib64/rocm/llvm/bin/clang++
+    [ -x /usr/lib64/rocm/llvm/bin/clang ] && rocm_clang=/usr/lib64/rocm/llvm/bin/clang
     cmake \
       -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CXX_COMPILER="$rocm_clangxx" \
+      -DCMAKE_C_COMPILER="$rocm_clang" \
+      -DGPU_TARGETS="$GFX_TARGET" \
       -DMIGRAPHX_GPU_TARGETS="$GFX_TARGET" \
       -DCMAKE_INSTALL_PREFIX="$MIGRAPHX_INSTALL" \
       -DCMAKE_PREFIX_PATH="$ROCM_PREFIX" \
