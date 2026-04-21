@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="pareto-title">
+  <title id="pareto-title">Accuracy vs speed on VoxConverse TEST, strict scoring. Witness in the Pareto-dominant corner.</title>
+  <style>
+    .pareto text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .pareto .c-accent { fill: #0b5fff; stroke: #0b5fff; }
+    .pareto .c-fg { fill: #1a1a1a; stroke: #1a1a1a; }
+    .pareto .c-muted { fill: #6b6b6b; stroke: #6b6b6b; }
+    .pareto .c-border { stroke: #e4e4e4; fill: none; }
+    @media (prefers-color-scheme: dark) {
+      .pareto .c-accent { fill: #7aa8ff; stroke: #7aa8ff; }
+      .pareto .c-fg { fill: #eaeaea; stroke: #eaeaea; }
+      .pareto .c-muted { fill: #a8a8a8; stroke: #a8a8a8; }
+      .pareto .c-border { stroke: #2a2e35; }
+    }
+  </style>
+  <g class="pareto">
+    <g class="c-border" stroke-width="0.75">
+      <line x1="60" y1="50" x2="60" y2="350"/>
+      <line x1="205" y1="50" x2="205" y2="350"/>
+      <line x1="350" y1="50" x2="350" y2="350"/>
+      <line x1="495" y1="50" x2="495" y2="350"/>
+      <line x1="640" y1="50" x2="640" y2="350"/>
+      <line x1="60" y1="50" x2="640" y2="50"/>
+      <line x1="60" y1="110" x2="640" y2="110"/>
+      <line x1="60" y1="170" x2="640" y2="170"/>
+      <line x1="60" y1="230" x2="640" y2="230"/>
+      <line x1="60" y1="290" x2="640" y2="290"/>
+      <line x1="60" y1="350" x2="640" y2="350"/>
+    </g>
+    <g class="c-muted" font-size="11" text-anchor="middle" stroke="none">
+      <text x="60" y="368">88.0</text>
+      <text x="205" y="368">88.5</text>
+      <text x="350" y="368">89.0</text>
+      <text x="495" y="368">89.5</text>
+      <text x="640" y="368">90.0</text>
+    </g>
+    <g class="c-muted" font-size="11" text-anchor="end" stroke="none">
+      <text x="54" y="54">50x</text>
+      <text x="54" y="114">40x</text>
+      <text x="54" y="174">30x</text>
+      <text x="54" y="234">20x</text>
+      <text x="54" y="294">10x</text>
+      <text x="54" y="354">0x</text>
+    </g>
+    <text x="350" y="395" text-anchor="middle" font-size="13" class="c-fg" stroke="none">Accuracy (100% - DER) on VoxConverse TEST, strict scoring. Higher is better.</text>
+    <text x="20" y="200" text-anchor="middle" font-size="13" class="c-fg" stroke="none" transform="rotate(-90 20 200)">Realtime factor. Higher is better.</text>
+    <circle cx="263" cy="128" r="6" class="c-fg" fill="none" stroke-width="2"/>
+    <text x="250" y="124" font-size="12" text-anchor="end" class="c-fg" stroke="none">pyannote 3.1 (RTX 4090, $1600)</text>
+    <text x="250" y="138" font-size="10" text-anchor="end" class="c-muted" stroke="none">88.7% (11.3% DER), ~37x</text>
+    <circle cx="420" cy="232" r="9" class="c-accent" stroke="none"/>
+    <text x="433" y="230" font-size="13" font-weight="700" class="c-fg" stroke="none">Witness (RX 9070, $550)</text>
+    <text x="433" y="246" font-size="11" class="c-muted" stroke="none">89.24% (10.76% DER), 20.37x</text>
+  </g>
+</svg>

@@ -6,9 +6,15 @@ ONNX Runtime's MIGraphX path already works on RDNA 2 and RDNA 3. RDNA 4 was the 
 
 What I actually measured, on a $550 RX 9070:
 
+<p align="center">
+  <img src="docs/pareto-test.svg" alt="Accuracy vs speed on VoxConverse TEST. Witness at 89.24% accuracy (10.76% DER) and 20.37x realtime on an AMD RX 9070 ($550). Pyannote 3.1 at 88.7% accuracy (11.3% DER) and ~37x on an NVIDIA RTX 4090 ($1600)." width="640">
+</p>
+
 - VoxConverse TEST (232 files, 43.5 h): **10.76% strict DER / 7.96% at c=0.25 / 7.01% lenient**, 20.37× realtime. The lowest open-source numbers I've found on this benchmark.
 - VoxConverse DEV (216 files, 20.3 h): **6.84% / 4.64% / 3.61%** under the same three conventions.
 - Hypothesis RTTMs are saved on disk; anyone with `pyannote.metrics` can re-score from them.
+
+Per-dollar speed: 20.37x/$550 (Witness) vs ~37x/$1600 (pyannote 3.1), about 60% more realtime per dollar on consumer AMD. No apples-to-apples cross-vendor benchmark exists; pyannote requires NVIDIA.
 
 Blog write-up: [Witness: frontier speaker diarization on AMD RDNA 4](https://maherr.dev/rdna4-missing-rung/).
 
