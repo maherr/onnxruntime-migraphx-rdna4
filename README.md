@@ -6,11 +6,11 @@ ONNX Runtime's MIGraphX path already works on RDNA 2 and RDNA 3. RDNA 4 was the 
 
 What I actually measured, on a $550 RX 9070:
 
-- VoxConverse TEST (232 files, 43.5 h): **10.65% strict DER / 7.85% at c=0.25 / 6.90% lenient**, 15.47× realtime. The lowest open-source numbers I've found on this benchmark.
+- VoxConverse TEST (232 files, 43.5 h): **10.76% strict DER / 7.96% at c=0.25 / 7.01% lenient**, 20.37× realtime. The lowest open-source numbers I've found on this benchmark.
 - VoxConverse DEV (216 files, 20.3 h): **6.84% / 4.64% / 3.61%** under the same three conventions.
 - Hypothesis RTTMs are saved on disk; anyone with `pyannote.metrics` can re-score from them.
 
-Blog write-up: [maherr.dev](https://maherr.dev) (pending publication).
+Blog write-up: [Witness: frontier speaker diarization on AMD RDNA 4](https://maherr.dev/rdna4-missing-rung/).
 
 ## Quickstart
 
