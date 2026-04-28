@@ -1,6 +1,6 @@
 # onnxruntime-migraphx-rdna4
 
-Eight small patches that let ONNX Runtime 1.24.2 + AMDMIGraphX (`rocm-6.4.2` branch) build and run on AMD RDNA 4 consumer GPUs (specifically the RX 9070 / Navi 48 / gfx1201) on Fedora 43.
+Seven small patches that let ONNX Runtime 1.24.2 + AMDMIGraphX (`rocm-6.4.2` branch) build and run on AMD RDNA 4 consumer GPUs (specifically the RX 9070 / Navi 48 / gfx1201) on Fedora 43.
 
 ONNX Runtime's MIGraphX path already works on RDNA 2 and RDNA 3. RDNA 4 was the missing rung. These patches fill it. The [Witness](witness/README.md) speaker-diarization pipeline that lives in `witness/` is the first thing I used to prove the stack end-to-end. This makes Witness the first documented working speaker-diarization pipeline on AMD RDNA 4 consumer GPUs (gfx1201). Every pyannote/WhisperX ROCm setup I found targets RDNA 3 or older (gfx1100 on the RX 7900 XTX and below). If you know of a prior RDNA 4 diarization implementation, please open an issue so it can be credited here. Any ONNX model that runs on ORT's CUDA EP should be attemptable on consumer AMD via this build.
 
@@ -28,7 +28,7 @@ sudo dnf install git cmake make rocm-runtime-devel rocm-hip-devel rocm-llvm-deve
 
 That pulls in ROCm 6.4.4, `hipcc`, and clang 19. On Ubuntu 22.04 with AMD's ROCm repos the equivalent is `rocm-dev` plus the `rocm-llvm` meta-package; pass `ROCM_PREFIX=/opt/rocm` to the build script.
 
-Build ORT + MIGraphX with the eight patches:
+Build ORT + MIGraphX with the seven patches:
 
 ```sh
 git clone https://github.com/maherr/onnxruntime-migraphx-rdna4.git
@@ -36,7 +36,7 @@ cd onnxruntime-migraphx-rdna4
 bash build.sh
 ```
 
-Expect ~45-75 min on a 16-thread machine and ~25 GB of free disk. The script clones MIGraphX at `rocm-6.4.2` (`db302ae`) and ORT at `v1.24.2` (`058787c`), applies the eight patches, builds both, and installs to `~/.local/share/gpu-diarization-build/` by default. Override via `BUILD_DIR`, `INSTALL_PREFIX`, `JOBS`, `GFX_TARGET`, `ROCM_PREFIX`.
+Expect ~45-75 min on a 16-thread machine and ~25 GB of free disk. The script clones MIGraphX at `rocm-6.4.2` (`db302ae`) and ORT at `v1.24.2` (`058787c`), applies the seven patches, builds both, and installs to `~/.local/share/gpu-diarization-build/` by default. Override via `BUILD_DIR`, `INSTALL_PREFIX`, `JOBS`, `GFX_TARGET`, `ROCM_PREFIX`.
 
 At the end of the build, the precompiled `.mxr` shipped in `artifacts/` is copied into `~/.cache/migraphx-compiled/`. If your ORT + MIGraphX + driver hashes match the pinned build, your first Witness call hits the warm cache (~17 s) instead of cold-compiling (~46 s). If they don't match, MIGraphX transparently re-compiles on first run.
 
@@ -54,12 +54,16 @@ Heads-up: the speakrs fork is a personal one that adds MIGraphX execution mode o
 ## What's in the repo
 
 ```
-patches/                              The eight patches + per-patch rationale
+patches/                              The seven active patches + per-patch rationale.
+                                      Originally shipped as 8; slot 05 retired
+                                      2026-04-20 (build-config error, not a
+                                      MIGraphX bug). Numbering preserved 01-08
+                                      so external references still map 1:1.
+                                      See `patches/README.md` for the update.
 ├── 01-migraphx-tf-subdir-disable.patch
 ├── 02-migraphx-tf-stub-header.patch
 ├── 03-migraphx-mlir-fuse-stub.patch
 ├── 04-migraphx-mlir-introspection-stub.patch
-├── 05-migraphx-hipcc-device-guard.patch
 ├── 06-migraphx-c-api-drop-tf-link.patch
 ├── 07-ort-fp4x2-fallback.patch
 └── 08-ort-bf16-skip.patch
